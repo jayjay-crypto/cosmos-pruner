@@ -5,7 +5,7 @@ import (
 	storetypes "cosmossdk.io/store/types"
 	"encoding/binary"
 	"fmt"
-	"github.com/bharvest-devops/cosmos-pruner/internal/rootmulti"
+	"github.com/jayjay-crypto/cosmos-pruner/internal/rootmulti"
 	"github.com/cockroachdb/pebble"
 	cometdb "github.com/cometbft/cometbft-db"
 	"github.com/cometbft/cometbft/state"
