@@ -12,6 +12,7 @@ import (
 	"github.com/cometbft/cometbft/store"
 	dbm "github.com/cosmos/cosmos-db"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -207,32 +208,22 @@ func pruneAppState(home string) error {
 	for i := 0; i < len(allVersions); i++ {
 		v64[i] = int64(allVersions[i])
 	}
+	sort.Slice(v64, func(i, j int) bool { return v64[i] < v64[j] })
 
-	versionsToPrune := int64(len(v64)) - int64(versions)
-	fmt.Printf("[pruneAppState] versionsToPrune=%d\n", versionsToPrune)
-	if versionsToPrune <= 0 {
-		fmt.Printf("[pruneAppState] No need to prune (%d)\n", versionsToPrune)
+	keep := int64(versions)
+	if int64(len(v64)) <= keep {
+		fmt.Printf("[pruneAppState] No need to prune (%d versions, keep %d)\n", len(v64), keep)
 	} else {
-		var (
-			pruningHeight int64
-			i             int
-		)
-		for {
-			pruningHeight = appStore.GetPruningHeight(versionsToPrune)
-			if i > 10000 {
-				panic("Could not found pruning height!! you should check if your storage is healthy")
-			}
-			if pruningHeight == 0 {
-				versionsToPrune--
-				i++
-				continue
-			}
-			break
-		}
+		// DeleteVersionsTo removes versions up to and including this height; keep the last `keep` versions.
+		pruningHeight := v64[len(v64)-int(keep)-1]
+		fmt.Printf("[pruneAppState] pruning up to version %d (keeping %d of %d versions, latest=%d)\n",
+			pruningHeight, keep, len(v64), v64[len(v64)-1])
 
 		err = appStore.PruneStores(pruningHeight)
 		if err != nil {
 			fmt.Println(err.Error())
+		} else {
+			fmt.Println("[pruneAppState] finished pruning application state")
 		}
 	}
 
@@ -268,9 +259,14 @@ func pruneTMData(home string) error {
 	defer stateStore.Close()
 
 	base := blockStore.Base()
+	height := blockStore.Height()
 
-	pruneHeight := blockStore.Height() - int64(blocks)
-	fmt.Printf("[pruneTMData] pruneHeight=%d\n", pruneHeight)
+	pruneHeight := height - int64(blocks)
+	fmt.Printf("[pruneTMData] base=%d height=%d pruneHeight=%d\n", base, height, pruneHeight)
+	if pruneHeight <= base {
+		fmt.Printf("[pruneTMData] No need to prune blocks (base %d >= target %d)\n", base, pruneHeight)
+		return nil
+	}
 	if pruneHeight <= 0 {
 		fmt.Println("[pruneTMData] No need to prune")
 		return nil
@@ -292,17 +288,19 @@ func pruneTMData(home string) error {
 	// prune block store
 	// prune one by one instead of range to avoid `panic: pebble: batch too large: >= 4.0 G` issue
 	// (see https://github.com/notional-labs/cosmprund/issues/11)
-	for pruneStateFrom := base; pruneStateFrom < pruneHeight-1; pruneStateFrom += rootmulti.PRUNE_BATCH_SIZE {
-		err = nil
-		height := pruneStateFrom
-		if height >= pruneHeight-1 {
-			height = pruneHeight - 1
+	for pruneStateFrom := base; pruneStateFrom < pruneHeight; pruneStateFrom += rootmulti.PRUNE_BATCH_SIZE {
+		batchEnd := pruneStateFrom + rootmulti.PRUNE_BATCH_SIZE
+		if batchEnd > pruneHeight {
+			batchEnd = pruneHeight
+		}
+		if batchEnd <= base {
+			continue
 		}
 
-		prunedBlocks, evidenceRetainBlocks, _ := blockStore.PruneBlocks(height, state)
+		prunedBlocks, evidenceRetainBlocks, err := blockStore.PruneBlocks(batchEnd, state)
 		if err != nil {
-			//return err
-			fmt.Println(err.Error())
+			fmt.Printf("[pruneTMData] PruneBlocks(%d) error: %s\n", batchEnd, err)
+			continue
 		}
 		prunedBlocksCount += prunedBlocks
 
