@@ -785,17 +785,26 @@ func pruneIAVLStoreKeepRecent(store *iavl.Store, name string, keepRecent int64, 
 	}
 	for int64(len(vers)) > keepRecent {
 		endIdx := len(vers) - int(keepRecent) - 1
+		var pruneTo int
 		if endIdx <= 0 {
-			break
-		}
-		step := incrementalBatch
-		if step > endIdx {
-			step = endIdx
-		}
-		if err := store.DeleteVersionsTo(int64(vers[step-1])); err != nil {
-			if err := store.DeleteVersionsTo(int64(vers[0])); err != nil {
-				return fmt.Errorf("incremental prune at %d: %w", vers[0], err)
+			pruneTo = vers[0]
+		} else {
+			step := incrementalBatch
+			if step > endIdx {
+				step = endIdx
 			}
+			pruneTo = vers[step-1]
+		}
+		if err := store.DeleteVersionsTo(int64(pruneTo)); err != nil {
+			if errors.Is(err, iavltree.ErrVersionDoesNotExist) {
+				fmt.Printf("[pruneAppState] store %s: skip missing version %d\n", name, pruneTo)
+				if len(vers) <= 1 {
+					break
+				}
+				vers = vers[1:]
+				continue
+			}
+			return fmt.Errorf("incremental prune at %d: %w", pruneTo, err)
 		}
 		vers = store.GetAllVersions()
 		sort.Ints(vers)
