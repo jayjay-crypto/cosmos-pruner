@@ -253,8 +253,6 @@ func pruneTMData(home string) error {
 		return errDBBState
 	}
 
-	var err error
-
 	stateStore := state.NewStore(stateDB, state.StoreOptions{})
 	defer stateStore.Close()
 
