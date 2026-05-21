@@ -277,6 +277,9 @@ func pruneTMData(home string) error {
 
 	fmt.Println("pruning block/state store")
 	state, err := stateStore.Load()
+	if err != nil {
+		return fmt.Errorf("load state: %w", err)
+	}
 
 	var (
 		prunedBlocksCount uint64
