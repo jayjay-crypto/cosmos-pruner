@@ -739,6 +739,71 @@ func (rs *Store) PruneStores(pruningHeight int64) (err error) {
 	return nil
 }
 
+// PruneStoresKeepRecent prunes each IAVL store independently, keeping the last keepRecent versions.
+func (rs *Store) PruneStoresKeepRecent(keepRecent int64) error {
+	if keepRecent <= 0 {
+		return fmt.Errorf("keepRecent must be positive")
+	}
+
+	const incrementalBatch = 500
+
+	keys := keysFromStoreKeyMap(rs.stores)
+	for _, key := range keys {
+		store := rs.stores[key]
+		if store.GetStoreType() != types.StoreTypeIAVL {
+			continue
+		}
+
+		iavlStore := rs.GetCommitKVStore(key).(*iavl.Store)
+		if err := pruneIAVLStoreKeepRecent(iavlStore, key.Name(), keepRecent, incrementalBatch); err != nil {
+			fmt.Printf("[pruneAppState] store %s: %v\n", key.Name(), err)
+		}
+	}
+	return nil
+}
+
+func pruneIAVLStoreKeepRecent(store *iavl.Store, name string, keepRecent int64, incrementalBatch int) error {
+	vers := store.GetAllVersions()
+	sort.Ints(vers)
+
+	if int64(len(vers)) <= keepRecent {
+		fmt.Printf("[pruneAppState] store %s: no prune needed (%d versions)\n", name, len(vers))
+		return nil
+	}
+
+	target := int64(vers[len(vers)-int(keepRecent)-1])
+	fmt.Printf("[pruneAppState] store %s: pruning up to version %d (keep %d of %d, latest=%d)\n",
+		name, target, keepRecent, len(vers), vers[len(vers)-1])
+
+	if err := store.DeleteVersionsTo(target); err == nil {
+		fmt.Printf("[pruneAppState] store %s: pruned OK\n", name)
+		return nil
+	} else if !errors.Is(err, iavltree.ErrVersionDoesNotExist) {
+		return err
+	} else {
+		fmt.Printf("[pruneAppState] store %s: batch prune failed (%v), pruning incrementally\n", name, err)
+	}
+	for int64(len(vers)) > keepRecent {
+		endIdx := len(vers) - int(keepRecent) - 1
+		if endIdx <= 0 {
+			break
+		}
+		step := incrementalBatch
+		if step > endIdx {
+			step = endIdx
+		}
+		if err := store.DeleteVersionsTo(int64(vers[step-1])); err != nil {
+			if err := store.DeleteVersionsTo(int64(vers[0])); err != nil {
+				return fmt.Errorf("incremental prune at %d: %w", vers[0], err)
+			}
+		}
+		vers = store.GetAllVersions()
+		sort.Ints(vers)
+	}
+	fmt.Printf("[pruneAppState] store %s: done (%d versions remaining)\n", name, len(vers))
+	return nil
+}
+
 // getStoreByName performs a lookup of a StoreKey given a store name typically
 // provided in a path. The StoreKey is then used to perform a lookup and return
 // a Store. If the Store is wrapped in an inter-block cache, it will be unwrapped

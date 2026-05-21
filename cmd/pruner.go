@@ -12,7 +12,6 @@ import (
 	"github.com/cometbft/cometbft/store"
 	dbm "github.com/cosmos/cosmos-db"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -202,29 +201,13 @@ func pruneAppState(home string) error {
 		return err
 	}
 
-	allVersions := appStore.GetAllVersions()
+	fmt.Printf("[pruneAppState] latest commit version %d, keeping %d IAVL versions per store\n",
+		appStore.LastCommitID().Version, versions)
 
-	v64 := make([]int64, len(allVersions))
-	for i := 0; i < len(allVersions); i++ {
-		v64[i] = int64(allVersions[i])
-	}
-	sort.Slice(v64, func(i, j int) bool { return v64[i] < v64[j] })
-
-	keep := int64(versions)
-	if int64(len(v64)) <= keep {
-		fmt.Printf("[pruneAppState] No need to prune (%d versions, keep %d)\n", len(v64), keep)
+	if err = appStore.PruneStoresKeepRecent(int64(versions)); err != nil {
+		fmt.Println(err.Error())
 	} else {
-		// DeleteVersionsTo removes versions up to and including this height; keep the last `keep` versions.
-		pruningHeight := v64[len(v64)-int(keep)-1]
-		fmt.Printf("[pruneAppState] pruning up to version %d (keeping %d of %d versions, latest=%d)\n",
-			pruningHeight, keep, len(v64), v64[len(v64)-1])
-
-		err = appStore.PruneStores(pruningHeight)
-		if err != nil {
-			fmt.Println(err.Error())
-		} else {
-			fmt.Println("[pruneAppState] finished pruning application state")
-		}
+		fmt.Println("[pruneAppState] finished pruning application state")
 	}
 
 	if compact {
