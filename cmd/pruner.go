@@ -1,20 +1,23 @@
 package cmd
 
 import (
-	"cosmossdk.io/log"
-	storetypes "cosmossdk.io/store/types"
 	"encoding/binary"
 	"fmt"
-	"github.com/jayjay-crypto/cosmos-pruner/internal/rootmulti"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+
+	"cosmossdk.io/log"
+	storetypes "cosmossdk.io/store/types"
 	"github.com/cockroachdb/pebble"
 	cometdb "github.com/cometbft/cometbft-db"
 	"github.com/cometbft/cometbft/state"
 	"github.com/cometbft/cometbft/store"
 	dbm "github.com/cosmos/cosmos-db"
-	"path/filepath"
-	"strconv"
-	"strings"
-
+	iavltree "github.com/cosmos/iavl"
+	iavldb "github.com/cosmos/iavl/db"
+	"github.com/jayjay-crypto/cosmos-pruner/internal/rootmulti"
 	"github.com/spf13/cobra"
 	"github.com/syndtr/goleveldb/leveldb/opt"
 )
@@ -165,49 +168,42 @@ func pruneAppState(home string) error {
 	if errDB != nil {
 		return errDB
 	}
-
 	defer appDB.Close()
 
-	var err error
-
-	//TODO: need to get all versions in the store, setting randomly is too slow
-	fmt.Println("pruning application state")
-
-	//// only mount keys from core sdk
-	//// todo allow for other keys to be mounted
-	//keys := types.NewKVStoreKeys(
-	//	authtypes.StoreKey, banktypes.StoreKey, stakingtypes.StoreKey,
-	//	minttypes.StoreKey, distrtypes.StoreKey, slashingtypes.StoreKey,
-	//	govtypes.StoreKey, paramstypes.StoreKey, ibchost.StoreKey, upgradetypes.StoreKey,
-	//	evidencetypes.StoreKey, ibctransfertypes.StoreKey, capabilitytypes.StoreKey,
-	//)
+	fmt.Println("pruning application state (IAVL sync mode for SDK 0.53+)")
 
 	keys := getStoreKeys(appDB)
-
-	// TODO: cleanup app state
-	appStore := rootmulti.NewStore(appDB, log.NewNopLogger())
+	latestVer := rootmulti.GetLatestVersion(appDB)
+	if latestVer <= 0 {
+		return fmt.Errorf("no valid latest application version found")
+	}
 
 	if txIdxHeight <= 0 {
-		txIdxHeight = appStore.LastCommitID().Version
+		txIdxHeight = latestVer
 		fmt.Printf("[pruneAppState] set txIdxHeight=%d\n", txIdxHeight)
 	}
 
-	for _, value := range keys {
-		appStore.MountStoreWithDB(storetypes.NewKVStoreKey(value), storetypes.StoreTypeIAVL, nil)
+	keepRecent := int64(versions)
+	if keepRecent <= 0 {
+		keepRecent = 10
 	}
 
-	err = appStore.LoadLatestVersion()
-	if err != nil {
-		return err
+	fmt.Printf("[pruneAppState] latest=%d keep=%d stores=%d\n", latestVer, keepRecent, len(keys))
+
+	successCount, errorCount := 0, 0
+	for _, name := range keys {
+		fmt.Printf("[pruneAppState] store %s\n", name)
+		if err := pruneIAVLTreeDirect(appDB, name, keepRecent); err != nil {
+			fmt.Printf("[pruneAppState] store %s: %v\n", name, err)
+			errorCount++
+			continue
+		}
+		successCount++
 	}
+	fmt.Printf("[pruneAppState] stores done: ok=%d errors=%d\n", successCount, errorCount)
 
-	fmt.Printf("[pruneAppState] latest commit version %d, keeping %d IAVL versions per store\n",
-		appStore.LastCommitID().Version, versions)
-
-	if err = appStore.PruneStoresKeepRecent(int64(versions)); err != nil {
-		fmt.Println(err.Error())
-	} else {
-		fmt.Println("[pruneAppState] finished pruning application state")
+	if err := pruneCommitInfoMetadata(appDB, latestVer, keepRecent); err != nil {
+		fmt.Printf("[pruneAppState] commit-info cleanup: %v\n", err)
 	}
 
 	if compact {
@@ -217,6 +213,136 @@ func pruneAppState(home string) error {
 		}
 	}
 
+	fmt.Println("[pruneAppState] finished pruning application state")
+	return nil
+}
+
+// pruneIAVLTreeDirect opens each store via MutableTree with Sync=true and AsyncPruning=false.
+// This is required for reliable offline pruning on Cosmos SDK v0.53+ / Axelar v1.5+.
+func pruneIAVLTreeDirect(appDB dbm.DB, storeName string, keepRecent int64) error {
+	const incrementalBatch = 500
+
+	prefix := fmt.Sprintf("s/k:%s/", storeName)
+	prefixed := dbm.NewPrefixDB(appDB, []byte(prefix))
+	tree := iavltree.NewMutableTree(
+		iavldb.NewWrapper(prefixed),
+		1000000,
+		false,
+		log.NewNopLogger(),
+		iavltree.SyncOption(true),
+		iavltree.AsyncPruningOption(false),
+	)
+
+	if _, err := tree.Load(); err != nil {
+		return fmt.Errorf("load tree: %w", err)
+	}
+
+	vers := tree.AvailableVersions()
+	if len(vers) == 0 {
+		fmt.Printf("[pruneAppState] store %s: no versions\n", storeName)
+		return nil
+	}
+	if int64(len(vers)) <= keepRecent {
+		fmt.Printf("[pruneAppState] store %s: no prune needed (%d versions)\n", storeName, len(vers))
+		return nil
+	}
+
+	sort.Ints(vers)
+	target := int64(vers[len(vers)-int(keepRecent)-1])
+	fmt.Printf("[pruneAppState] store %s: pruning up to %d (keep %d of %d, latest=%d)\n",
+		storeName, target, keepRecent, len(vers), vers[len(vers)-1])
+
+	if err := tree.DeleteVersionsTo(target); err == nil {
+		after := tree.AvailableVersions()
+		fmt.Printf("[pruneAppState] store %s: pruned OK (%d remaining)\n", storeName, len(after))
+		return nil
+	} else if !strings.Contains(err.Error(), "does not exist") {
+		return err
+	} else {
+		fmt.Printf("[pruneAppState] store %s: batch prune failed (%v), pruning incrementally\n", storeName, err)
+	}
+
+	for int64(len(vers)) > keepRecent {
+		endIdx := len(vers) - int(keepRecent) - 1
+		if endIdx <= 0 {
+			break
+		}
+		step := incrementalBatch
+		if step > endIdx {
+			step = endIdx
+		}
+		pruneTo := int64(vers[step-1])
+		if err := tree.DeleteVersionsTo(pruneTo); err != nil {
+			if strings.Contains(err.Error(), "does not exist") {
+				vers = vers[1:]
+				continue
+			}
+			return fmt.Errorf("incremental prune at %d: %w", pruneTo, err)
+		}
+		vers = tree.AvailableVersions()
+		sort.Ints(vers)
+	}
+	fmt.Printf("[pruneAppState] store %s: done (%d versions remaining)\n", storeName, len(vers))
+	return nil
+}
+
+func pruneCommitInfoMetadata(appDB dbm.DB, latestVer, keepRecent int64) error {
+	target := latestVer - keepRecent
+	if target <= 0 {
+		return nil
+	}
+
+	fmt.Printf("[pruneAppState] cleaning commit-info metadata below %d\n", target)
+
+	iter, err := appDB.Iterator([]byte("s/"), nil)
+	if err != nil {
+		return err
+	}
+	defer iter.Close()
+
+	var toDelete [][]byte
+	for ; iter.Valid(); iter.Next() {
+		key := string(iter.Key())
+		if !strings.HasPrefix(key, "s/") {
+			break
+		}
+		if strings.HasPrefix(key, "s/k:") || key == "s/latest" || key == "s/pruneheights" {
+			continue
+		}
+		var ver int64
+		if _, err := fmt.Sscanf(key[2:], "%d", &ver); err != nil {
+			continue
+		}
+		if ver < target {
+			toDelete = append(toDelete, append([]byte(nil), iter.Key()...))
+		}
+	}
+
+	if len(toDelete) == 0 {
+		fmt.Println("[pruneAppState] no old commit-info entries")
+		return nil
+	}
+
+	batch := appDB.NewBatch()
+	defer batch.Close()
+	count := 0
+	for _, key := range toDelete {
+		if err := batch.Delete(key); err != nil {
+			return err
+		}
+		count++
+		if count%10000 == 0 {
+			if err := batch.Write(); err != nil {
+				return err
+			}
+			batch.Close()
+			batch = appDB.NewBatch()
+		}
+	}
+	if err := batch.Write(); err != nil {
+		return err
+	}
+	fmt.Printf("[pruneAppState] deleted %d commit-info entries\n", len(toDelete))
 	return nil
 }
 

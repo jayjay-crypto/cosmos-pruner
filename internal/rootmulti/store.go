@@ -62,18 +62,21 @@ type Store struct {
 	pruningManager      *pruning.Manager
 	iavlCacheSize       int
 	iavlDisableFastNode bool
-	storesParams        map[types.StoreKey]storeParams
-	stores              map[types.StoreKey]types.CommitKVStore
-	keysByName          map[string]types.StoreKey
-	initialVersion      int64
-	removalMap          map[types.StoreKey]bool
-	traceWriter         io.Writer
-	traceContext        types.TraceContext
-	traceContextMutex   sync.Mutex
-	interBlockCache     types.MultiStorePersistentCache
-	listeners           map[types.StoreKey]*types.MemoryListener
-	metrics             metrics.StoreMetrics
-	commitHeader        cmtproto.Header
+	// iavlSyncPruning should rarely be set to true.
+	// Offline prune forces this to true so deletions finish before return.
+	iavlSyncPruning bool
+	storesParams    map[types.StoreKey]storeParams
+	stores          map[types.StoreKey]types.CommitKVStore
+	keysByName      map[string]types.StoreKey
+	initialVersion  int64
+	removalMap      map[types.StoreKey]bool
+	traceWriter     io.Writer
+	traceContext    types.TraceContext
+	traceContextMutex sync.Mutex
+	interBlockCache types.MultiStorePersistentCache
+	listeners       map[types.StoreKey]*types.MemoryListener
+	metrics         metrics.StoreMetrics
+	commitHeader    cmtproto.Header
 }
 
 var (
@@ -95,6 +98,7 @@ func NewStore(db dbm.DB, logger log.Logger) *Store {
 		logger:              logger,
 		iavlCacheSize:       iavl.DefaultIAVLCacheSize,
 		iavlDisableFastNode: iavlDisablefastNodeDefault,
+		iavlSyncPruning:     true, // offline pruner default: synchronous deletions
 		storesParams:        make(map[types.StoreKey]storeParams),
 		stores:              make(map[types.StoreKey]types.CommitKVStore),
 		keysByName:          make(map[string]types.StoreKey),
@@ -102,6 +106,12 @@ func NewStore(db dbm.DB, logger log.Logger) *Store {
 		removalMap:          make(map[types.StoreKey]bool),
 		metrics:             metrics.NewNoOpMetrics(),
 	}
+}
+
+// SetIAVLSyncPruning configures whether IAVL pruning is synchronous.
+// When true, prune waits until deletions are persisted (required for offline tools).
+func (rs *Store) SetIAVLSyncPruning(syncPruning bool) {
+	rs.iavlSyncPruning = syncPruning
 }
 
 func (rs *Store) GetPruningHeight(version int64) int64 {
@@ -1120,10 +1130,15 @@ func (rs *Store) loadCommitStoreFromParams(key types.StoreKey, id types.CommitID
 		var store types.CommitKVStore
 		var err error
 
+		// Offline pruning must be synchronous (SDK 0.53+ defaults to async pruning).
+		syncOpts := []iavltree.Option{
+			iavltree.SyncOption(true),
+			iavltree.AsyncPruningOption(!rs.iavlSyncPruning),
+		}
 		if params.initialVersion == 0 {
-			store, err = iavl.LoadStore(db, rs.logger, key, id, rs.iavlCacheSize, rs.iavlDisableFastNode, rs.metrics)
+			store, err = iavl.LoadStoreWithOpts(db, rs.logger, key, id, 0, rs.iavlCacheSize, rs.iavlDisableFastNode, rs.metrics, syncOpts...)
 		} else {
-			store, err = iavl.LoadStoreWithInitialVersion(db, rs.logger, key, id, params.initialVersion, rs.iavlCacheSize, rs.iavlDisableFastNode, rs.metrics)
+			store, err = iavl.LoadStoreWithOpts(db, rs.logger, key, id, params.initialVersion, rs.iavlCacheSize, rs.iavlDisableFastNode, rs.metrics, syncOpts...)
 		}
 
 		if err != nil {
