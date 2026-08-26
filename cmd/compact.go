@@ -2,67 +2,52 @@ package cmd
 
 import (
 	"fmt"
+
 	"github.com/spf13/cobra"
 )
 
 func compactCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "compact [path_to_home]",
-		Short: "compact data from the application store and block store",
+		Use:   "compact [path_to_data]",
+		Short: "compact databases (rewrite by default: copy live keys into a fresh DB)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if tendermint {
-				blockStoreDB, errDBBlock := openCometBFTDB("blockstore", args[0])
-				defer blockStoreDB.Close()
+			home := args[0]
+			// compact subcommand defaults to rewrite unless user passed --rewrite=false
+			if !cmd.Flags().Changed("rewrite") {
+				rewrite = true
+			}
 
-				if errDBBlock != nil {
-					return errDBBlock
-				}
-				if err := compactCometBFTDB(blockStoreDB); err != nil {
+			if rewrite {
+				fmt.Println("Using rewrite compaction (needs free disk ≈ size of each DB while copying)")
+			}
+
+			if tendermint {
+				fmt.Println("compacting blockstore")
+				if err := rewriteOrForceCompactComet("blockstore", home); err != nil {
 					fmt.Println(err.Error())
 				}
-
-				stateDB, errDBBState := openCometBFTDB("state", args[0])
-				defer stateDB.Close()
-
-				if errDBBState != nil {
-					return errDBBState
-				}
-				if err := compactCometBFTDB(stateDB); err != nil {
+				fmt.Println("compacting state")
+				if err := rewriteOrForceCompactComet("state", home); err != nil {
 					fmt.Println(err.Error())
 				}
 			}
 
 			if cosmosSdk {
-				appDB, errDB := openCosmosDB("application", args[0])
-				defer appDB.Close()
-
-				if errDB != nil {
-					return errDB
-				}
-				if err := compactCosmosDB(appDB); err != nil {
+				fmt.Println("compacting application")
+				if err := rewriteOrForceCompactCosmos("application", home); err != nil {
 					fmt.Println(err.Error())
 				}
 			}
 
 			if tx_idx {
-				txIdxDB, err := openCosmosDB("tx_index", args[0])
-				if err != nil {
-					return err
-				}
-
-				defer func() {
-					errClose := txIdxDB.Close()
-					if errClose != nil {
-						fmt.Println(errClose.Error())
-					}
-				}()
-
-				if err := compactCosmosDB(txIdxDB); err != nil {
+				fmt.Println("compacting tx_index")
+				if err := rewriteOrForceCompactCosmos("tx_index", home); err != nil {
 					fmt.Println(err.Error())
 				}
 			}
 
+			fmt.Println("compact finished")
 			return nil
 		},
 	}

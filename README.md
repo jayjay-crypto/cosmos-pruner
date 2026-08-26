@@ -54,17 +54,35 @@ systemctl start axelard
 
 Adjust the path if you use `~/.axelar/.core/data`.
 
+### Compact rewrite (reclaim disk)
+
+`ForceCompact` often leaves large LevelDB files. Rewrite copies **live keys only** into a fresh DB:
+
+```bash
+# Needs free disk ≈ size of application.db while running
+./build/cosmos-pruner compact ~/.axelar/data --backend=goleveldb
+# rewrite is ON by default for the compact command
+
+# Or after prune:
+./build/cosmos-pruner prune ~/.axelar/data \
+  --backend=goleveldb --blocks=2 --versions=2 \
+  --compact=true --rewrite=true
+```
+
+Then check size: `du -sh ~/.axelar/data/application.db`
+
 ### Flags
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--blocks` | 10 | CometBFT blocks to keep |
 | `--versions` | 10 | App-state IAVL versions to keep |
-| `--backend` | goleveldb | `goleveldb` or `pebbledb` (must match `app.toml`) |
-| `--cosmos-sdk` | true | Prune application state |
-| `--tendermint` | true | Prune blockstore and state |
-| `--tx_index` | true | Prune `tx_index` DB |
-| `--compact` | true | Compact DBs after pruning |
+| `--backend` | goleveldb | `goleveldb` or `pebbledb` |
+| `--cosmos-sdk` | true | Prune / compact application state |
+| `--tendermint` | true | Prune / compact blockstore and state |
+| `--tx_index` | true | Prune / compact `tx_index` |
+| `--compact` | true | Compact after prune |
+| `--rewrite` | false on prune, **true on compact** | Rewrite DBs (copy live keys) instead of ForceCompact |
 
 ## Disclaimer
 

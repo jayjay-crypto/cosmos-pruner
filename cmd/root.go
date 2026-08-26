@@ -16,6 +16,7 @@ var (
 	versions   uint64
 	tx_idx     bool
 	compact    bool
+	rewrite    bool
 	appName    = "cosmos-pruner"
 )
 
@@ -71,6 +72,9 @@ func NewRootCmd() *cobra.Command {
 
 	// --compact flag
 	rootCmd.PersistentFlags().BoolVar(&compact, "compact", true, "set to false you dont want to compact dbs after prunning")
+
+	// --rewrite flag: copy live keys into a fresh DB (reclaims space better than ForceCompact)
+	rootCmd.PersistentFlags().BoolVar(&rewrite, "rewrite", false, "rewrite DBs instead of ForceCompact (needs free disk ≈ DB size; default true for 'compact' command)")
 
 	rootCmd.AddCommand(
 		pruneCmd(),

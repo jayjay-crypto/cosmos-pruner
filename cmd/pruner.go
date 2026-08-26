@@ -73,16 +73,10 @@ func pruneTxIndex(home string) error {
 		return err
 	}
 
-	defer func() {
-		errClose := txIdxDB.Close()
-		if errClose != nil {
-			fmt.Println(errClose.Error())
-		}
-	}()
-
 	pruneHeight := txIdxHeight - int64(blocks) - 10
 	if pruneHeight <= 0 {
 		fmt.Printf("No need to prune (pruneHeight=%d)\n", pruneHeight)
+		_ = txIdxDB.Close()
 		return nil
 	}
 
@@ -91,9 +85,13 @@ func pruneTxIndex(home string) error {
 
 	fmt.Println("finished pruning tx_index")
 
+	if err := txIdxDB.Close(); err != nil {
+		fmt.Println(err.Error())
+	}
+
 	if compact {
 		fmt.Println("compacting tx_index")
-		if err := compactCosmosDB(txIdxDB); err != nil {
+		if err := rewriteOrForceCompactCosmos("tx_index", home); err != nil {
 			fmt.Println(err.Error())
 		}
 	}
@@ -169,13 +167,13 @@ func pruneAppState(home string) error {
 	if errDB != nil {
 		return errDB
 	}
-	defer appDB.Close()
 
 	fmt.Println("pruning application state (IAVL sync mode for SDK 0.53+)")
 
 	keys := getStoreKeys(appDB)
 	latestVer := rootmulti.GetLatestVersion(appDB)
 	if latestVer <= 0 {
+		_ = appDB.Close()
 		return fmt.Errorf("no valid latest application version found")
 	}
 
@@ -207,9 +205,13 @@ func pruneAppState(home string) error {
 		fmt.Printf("[pruneAppState] commit-info cleanup: %v\n", err)
 	}
 
+	if err := appDB.Close(); err != nil {
+		return err
+	}
+
 	if compact {
 		fmt.Println("compacting application state")
-		if err := compactCosmosDB(appDB); err != nil {
+		if err := rewriteOrForceCompactCosmos("application", home); err != nil {
 			fmt.Println(err.Error())
 		}
 	}
@@ -353,16 +355,15 @@ func pruneTMData(home string) error {
 	}
 
 	blockStore := store.NewBlockStore(blockStoreDB)
-	defer blockStore.Close()
 
 	// Get StateStore
 	stateDB, errDBBState := openCometBFTDB("state", home)
 	if errDBBState != nil {
+		_ = blockStore.Close()
 		return errDBBState
 	}
 
 	stateStore := state.NewStore(stateDB, state.StoreOptions{})
-	defer stateStore.Close()
 
 	base := blockStore.Base()
 	height := blockStore.Height()
@@ -371,10 +372,20 @@ func pruneTMData(home string) error {
 	fmt.Printf("[pruneTMData] base=%d height=%d pruneHeight=%d\n", base, height, pruneHeight)
 	if pruneHeight <= base {
 		fmt.Printf("[pruneTMData] No need to prune blocks (base %d >= target %d)\n", base, pruneHeight)
+		_ = blockStore.Close()
+		_ = stateStore.Close()
+		if compact {
+			fmt.Println("compacting block store")
+			_ = rewriteOrForceCompactComet("blockstore", home)
+			fmt.Println("compacting state store")
+			_ = rewriteOrForceCompactComet("state", home)
+		}
 		return nil
 	}
 	if pruneHeight <= 0 {
 		fmt.Println("[pruneTMData] No need to prune")
+		_ = blockStore.Close()
+		_ = stateStore.Close()
 		return nil
 	}
 
@@ -443,16 +454,17 @@ func pruneTMData(home string) error {
 
 	fmt.Printf("Pruned blocks count: %d\n", prunedBlocksCount)
 
-	if compact {
-		fmt.Println("compacting block store")
-		if err := compactCometBFTDB(blockStoreDB); err != nil {
-			fmt.Println(err.Error())
-		}
-	}
+	_ = blockStore.Close()
+	_ = stateStore.Close()
 
 	if compact {
+		fmt.Println("compacting block store")
+		if err := rewriteOrForceCompactComet("blockstore", home); err != nil {
+			fmt.Println(err.Error())
+		}
+
 		fmt.Println("compacting state store")
-		if err := compactCometBFTDB(stateDB); err != nil {
+		if err := rewriteOrForceCompactComet("state", home); err != nil {
 			fmt.Println(err.Error())
 		}
 	}
