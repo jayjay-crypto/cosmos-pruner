@@ -13,7 +13,7 @@ require (
 	github.com/cometbft/cometbft-db v0.14.1
 	github.com/cosmos/cosmos-db v1.1.3
 	github.com/cosmos/gogoproto v1.7.2
-	github.com/cosmos/iavl v1.2.4
+	github.com/cosmos/iavl v1.2.8
 	github.com/gogo/protobuf v1.3.3
 	github.com/pkg/errors v0.9.1
 	github.com/spf13/cobra v1.9.1

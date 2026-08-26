@@ -9,7 +9,7 @@ Offline pruning for application state (IAVL) and CometBFT block/state data.
 | Dependency | Version |
 |------------|---------|
 | cosmossdk.io/store | v1.1.2 |
-| github.com/cosmos/iavl | v1.2.4 |
+| github.com/cosmos/iavl | v1.2.8 (skip missing version roots while pruning) |
 | github.com/cometbft/cometbft | v0.38.25 |
 | github.com/cometbft/cometbft-db | v0.14.1 |
 | github.com/cosmos/cosmos-db | v1.1.3 |

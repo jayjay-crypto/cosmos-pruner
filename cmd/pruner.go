@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -219,8 +220,9 @@ func pruneAppState(home string) error {
 
 // pruneIAVLTreeDirect opens each store via MutableTree with Sync=true and AsyncPruning=false.
 // This is required for reliable offline pruning on Cosmos SDK v0.53+ / Axelar v1.5+.
+// Uses IAVL >= v1.2.8 so DeleteVersionsTo continues past dangling/missing version roots.
 func pruneIAVLTreeDirect(appDB dbm.DB, storeName string, keepRecent int64) error {
-	const incrementalBatch = 500
+	const progressBatch int64 = 100_000
 
 	prefix := fmt.Sprintf("s/k:%s/", storeName)
 	prefixed := dbm.NewPrefixDB(appDB, []byte(prefix))
@@ -248,41 +250,38 @@ func pruneIAVLTreeDirect(appDB dbm.DB, storeName string, keepRecent int64) error
 	}
 
 	sort.Ints(vers)
+	first := int64(vers[0])
+	latest := int64(vers[len(vers)-1])
 	target := int64(vers[len(vers)-int(keepRecent)-1])
-	fmt.Printf("[pruneAppState] store %s: pruning up to %d (keep %d of %d, latest=%d)\n",
-		storeName, target, keepRecent, len(vers), vers[len(vers)-1])
+	fmt.Printf("[pruneAppState] store %s: pruning %d→%d (keep %d of %d, latest=%d)\n",
+		storeName, first, target, keepRecent, len(vers), latest)
 
-	if err := tree.DeleteVersionsTo(target); err == nil {
-		after := tree.AvailableVersions()
-		fmt.Printf("[pruneAppState] store %s: pruned OK (%d remaining)\n", storeName, len(after))
-		return nil
-	} else if !strings.Contains(err.Error(), "does not exist") {
-		return err
-	} else {
-		fmt.Printf("[pruneAppState] store %s: batch prune failed (%v), pruning incrementally\n", storeName, err)
-	}
-
-	for int64(len(vers)) > keepRecent {
-		endIdx := len(vers) - int(keepRecent) - 1
-		if endIdx <= 0 {
-			break
+	for to := first; to <= target; {
+		chunkTo := to + progressBatch - 1
+		if chunkTo > target {
+			chunkTo = target
 		}
-		step := incrementalBatch
-		if step > endIdx {
-			step = endIdx
-		}
-		pruneTo := int64(vers[step-1])
-		if err := tree.DeleteVersionsTo(pruneTo); err != nil {
-			if strings.Contains(err.Error(), "does not exist") {
-				vers = vers[1:]
+		fmt.Printf("[pruneAppState] store %s: DeleteVersionsTo(%d)...\n", storeName, chunkTo)
+		if err := tree.DeleteVersionsTo(chunkTo); err != nil {
+			// v1.2.8+ should skip missing roots internally; still guard for edge cases.
+			if errors.Is(err, iavltree.ErrVersionDoesNotExist) {
+				fmt.Printf("[pruneAppState] store %s: skip missing around %d (%v)\n", storeName, chunkTo, err)
+				if chunkTo >= target {
+					break
+				}
+				to = chunkTo + 1
 				continue
 			}
-			return fmt.Errorf("incremental prune at %d: %w", pruneTo, err)
+			return fmt.Errorf("DeleteVersionsTo(%d): %w", chunkTo, err)
 		}
-		vers = tree.AvailableVersions()
-		sort.Ints(vers)
+		if chunkTo >= target {
+			break
+		}
+		to = chunkTo + 1
 	}
-	fmt.Printf("[pruneAppState] store %s: done (%d versions remaining)\n", storeName, len(vers))
+
+	after := tree.AvailableVersions()
+	fmt.Printf("[pruneAppState] store %s: pruned OK (%d remaining)\n", storeName, len(after))
 	return nil
 }
 
